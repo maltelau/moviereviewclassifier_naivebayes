@@ -15,6 +15,7 @@ import logging
 # lemma = nltk.wordnet.WordNetLemmatizer()
 translate_table = dict((ord(char), None) for char in string.punctuation)  
 
+from typing import List
 
 ################################
 # Set up logging
@@ -42,111 +43,42 @@ debug_Y = pd.Series(['n', 'p', 'p', 'n'])
 #################################
 # Classes
 
+class AnalysisStep:
+    def __init__(self):
+        pass
+    def fit(self, *args, **kwargs):
+        return self
+    def transform(self, *args, **kwargs):
+        raise NotImplementedError
+    def fit_transform(self, X, *args, **kwards):
+        return self.fit(X).transform(X)
 
-class NaiveBayes:
-    """
-    Fit a naive bayes classifier
-    Requires a subclass to define the encode method to transform 
-      the documents (X) to word vectors (X_enc)
-    Input to self.fit():
-      X: a "list" of n documents
-      Y: a "list" of n labels (of u unique classes)
-      alpha: add-alpha smoothing (add alpha to each word vector during training
-                                  to avoid probabilities of zero)
-    Intermediates:
-      self.word_list: list of w unique words
-      self.X_enc: sparse matrix of n * w word counts
-      self.prior: list of u prior log(probabilities), p(class)
-      self.likelihood: sparse matrix of u * w log(likelihood), p(word|class)
-      self.posterior: matrix of n x u log(posterior), p(class|word)
-    Output:
-      self.predict(Y) returns predicted labels for new data Y
-    
-    """      
-    def fit(self,
-            X: pd.Series,
-            Y: pd.Series,
-            alpha: float = 1):
-        
-        self.X_train = X
-        self.Y_train = Y
-        logger.info("fitting model: " + type(self).__name__)
+class RemovePunctuation(AnalysisStep):
+    def __init__(self, translate_table):
+        self.tt = translate_table
+    def transform(self, X: pd.Series) -> pd.Series:
+        return X.apply(lambda review: review.translate(self.tt))
 
-        # clean the input text
-        logger.info("cleaning training data")
-        X = self.clean_text(X)
-        
-        logger.info("encoding training set")
-        self.X_train_enc = self.encode(X)
-        self.alpha = alpha
-        
-        # calculate the priors P(c)
-        self.prior = np.log(np.array(Y.value_counts() / len(Y)))
-        
-        logger.info("calculating likelihood")
-        # initialize 
-        self.unstd_likelihood = np.empty([len(Y_train.unique()),
-                                          len(self.word_set)])
+class LowerCase(AnalysisStep):
+    def transform(self, X: pd.Series) -> pd.Series:
+        return X.apply(lambda s: s.lower())
 
-        for i, cls in enumerate(Y_train.unique()):
-            self.unstd_likelihood[i] = self.X_train_enc[np.where(Y_train == cls)].\
-                                       sum(axis = 0) \
-                                       + alpha
+class BagOfWordsEncode(AnalysisStep):
+    def __init__(self):
+        self.word_set = None
+        self.word_set_dictionary = None
 
-        self.likelihood = np.log(
-            self.unstd_likelihood \
-            / np.apply_along_axis(sum, 0, self.unstd_likelihood))
-        
+    def fit(self, X):
+        logger.info("calculating word set")
+        self.word_set = list(set([word for review in X for word in review.split()]))
+        self.word_set_dictionary = dict((v,k) for k,v in enumerate(self.word_set))
         return self
 
-    def get_posterior(self, X: pd.Series) -> pd.Series:
-        # compute the posterior
-        
-        logger.info("encoding the test set")
-        self.X_test_enc = self.encode(X, word_set = self.word_set)
-        
-        logger.info("calculating posterior")
-        self.posterior = np.hstack([(self.X_test_enc * sp.diags(cls)).sum(axis = 1) \
-                                    for cls in self.likelihood]) \
-                                        + self.prior
-        return self.posterior
 
-    def predict(self, X: pd.Series) -> pd.Series:
-        # return the predicted labels (ie y_pred)
+    def transform(self, X: pd.Series) -> sp.csr_matrix:
+        if not self.word_set:
+            logger.error('Need to fit the encoder before transforming')
         
-        logger.info("cleaning test data")
-        X = self.clean_text(X)
-        posterior = self.get_posterior(X)
-        
-        # select the class with the highest posterior
-        self.predictions = pd.Series(self.Y_train.unique()[[np.argmax(review) \
-                                                            for review in posterior]])
-        return self.predictions
-  
-    def clean_text(self, X: pd.Series):
-        X = X.apply(lambda review: review.translate(translate_table))
-        
-        # alternate method: lemmatize via nltk.
-        # This was slow and only gave 0.0001 extra F1 score so I dropped it.
-        # X = X.apply(lambda review: ' '.join([lemma.lemmatize(word.translate(translate_table)) \
-        #                                      for word in review.split()]))
-        
-        return X
-    
-    def encode(self, X: pd.Series):
-        # should only be called after selecting an appropriate subclass
-        # with the chosen encoding method
-        # ie BagOfWordsNB()
-        raise NotImplementedError
-
-class BagOfWordsNB(NaiveBayes):
-    def encode(self, X, word_set = None):
-        if not word_set:
-            logger.info("calculating word set")
-            word_set = list(set([word for review in X for word in review.split()]))
-            self.word_set = word_set
-            self.word_set_dictionary = dict((v,k) for k,v in enumerate(word_set))
-
         logger.info("generating word vectors")
         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_matrix.html
         indptr = [0]
@@ -162,36 +94,86 @@ class BagOfWordsNB(NaiveBayes):
 
         X_enc = sp.csr_matrix((data, indices, indptr),
                               shape = (len(X),
-                                       len(word_set)))
+                                       len(self.word_set)))
         return X_enc
 
+    
+class BinaryBagOfWordsEncode(BagOfWordsEncode):
+    def transform(self, X: pd.Series) -> sp.csr_matrix:
+        for i, review in enumerate(X):
+            X[i] = ' '.join(set(review.split()))
+
+        return super().transform(X)
+        
+
+class NaiveBayes(AnalysisStep):
+    """
+    Fit a naive bayes classifier
+    Requires a subclass to define the encode method to transform 
+      the documents (X) to word vectors (X_enc)
+    Input to self.fit():
+      X: sparse matrix of n * w word counts
+      Y: a "list" of n labels (of u unique classes)
+      alpha: add-alpha smoothing (add alpha to each word vector during training
+                                  to avoid probabilities of zero)
+    Intermediates:
+      self.prior: list of u prior log(probabilities), p(class)
+      self.likelihood: sparse matrix of u * w log(likelihood), p(word|class)
+      self.posterior: matrix of n x u log(posterior), p(class|word)
+    Output:
+      self.predict(Y) returns predicted labels for new data Y
+    
+    """      
+    def fit(self,
+            X: sp.csr_matrix,
+            Y: pd.Series,
+            alpha: float = 1):
+        
+        # self.X_train = X
+        self.Y_train = Y
+        logger.info("fitting model: " + type(self).__name__)
+
+        self.X_train_enc = X
+        self.alpha = alpha
+        
+        # calculate the priors P(c)
+        self.prior = np.log(np.array(Y.value_counts() / len(Y)))
+        
+        logger.info("calculating likelihood")
+        # initialize an empy array of the correct shape
+        self.unstd_likelihood = np.empty([len(Y_train.unique()),
+                                          X.shape[1]])
+
+        # for each class, sum up the counts for each word
+        for i, cls in enumerate(Y_train.unique()):
+            self.unstd_likelihood[i] = self.X_train_enc[np.where(Y_train == cls)].\
+                                       sum(axis = 0) \
+                                       + alpha
+
+        self.likelihood = np.log(
+            self.unstd_likelihood \
+            / np.apply_along_axis(sum, 0, self.unstd_likelihood))
+        
+        return self
 
 
-# class BinaryNB(NaiveBayes):
-#     def encode(self, X, word_set = None):
-#         if not word_set:
-#             word_set = list(set([word for review in X for word in review.split()]))
-#             self.word_set = word_set
-#         # binary bag of words-encode
-#         return pd.DataFrame([X.apply(lambda word: word.find(feature)+1) \
-#                                        for feature in word_set],
-#                                       index = word_set).T
+    def predict(self, X: sp.csr_matrix) -> pd.Series:
+        # return the predicted labels (ie y_pred)
 
-class BagOfWordsNB_countvectorizer(BagOfWordsNB):
-    def encode(self, X, word_set = None):
-        if not word_set:
-            logger.info("calculating word set")
-            word_set = countvec().fit(X)
-            self.word_set = word_set
-            
-        X_enc = self.word_set.transform(X).toarray()
-        return X_enc
+        logger.info("calculating posterior")
+        self.posterior = np.hstack([(X * sp.diags(cls)).sum(axis = 1) \
+                                    for cls in self.likelihood]) \
+                                        + self.prior
+        
+        # select the class with the highest posterior
+        self.predictions = pd.Series(self.Y_train.unique()[[np.argmax(review) \
+                                                            for review in self.posterior]])
+        return self.predictions
 
-# testm1 = BagOfWordsNB().fit(Y,X)
-# testm2 = BinaryNB().fit(Y, X)
 
 ###############################################
 # Helper functions
+
 
 def contingency(true, predicted, pos):
     tp = sum([(t == pos) & (pos == p) for t,p in zip(true, predicted)])
@@ -254,35 +236,47 @@ def read_data(path, max_files = None):
     return X, Y
 
 
-def run_once():
-    # model = BagOfWordsNB_countvectorizer().fit(X_train, Y_train, alpha = 1)
-    model = BagOfWordsNB().fit(X_train, Y_train, alpha = 1)
+
+def run_once(X_train, X_test, Y_train, Y_test, pipeline, model):
+    for i in range(len(pipeline)):
+        logger.debug(f'Preprocessing pipeline step {i+1} of {len(pipeline)}')
+        pipeline[i] = pipeline[i].fit(X_train)
+        X_train = pipeline[i].transform(X_train)
+        X_test = pipeline[i].transform(X_test)
+
+    model = model.fit(X_train, Y_train, alpha = 1)
     Y_pred = model.predict(X_test)
     print(f"Prediction counts: {dict(collections.Counter(Y_pred))}\nF1: {F1(Y_test, Y_pred, 'p'):.3f}\nAccuracy: {accuracy(Y_test, Y_pred, 'p'):.3f}")
     return model
 
     
 
-def run_cv():
-    results = pd.DataFrame(columns = ['Model','it', 'k', 'n', 'Accuracy', 'F1', 'Time'])
+def run_cv(X_train, X_test, Y_train, Y_test):
+    results = pd.DataFrame(columns = ['Model','fold', 'k', 'n', 'Accuracy', 'F1', 'Time'])
     
-    for k_i, k in enumerate([2]):
+    for k in [5, 10]: # k fold cv
         # f1 = collections.defaultdict(list)
         # acc = collections.defaultdict(list)
         # t = collections.defaultdict(list)
         
-        for it, fold in enumerate(cv_folds(len(X_train.text), k)):
-            print("Fold:", it+1, "of", k)
-            rest = [i for i in range(len(X_train.text)) if i not in fold]
+        for it, fold in enumerate(cv_folds(len(X_train), k)): # process one fold
+            logger.info(f"FOLD: {it+1} of {k}")
+            rest = [i for i in range(len(X_train)) if i not in fold]
                 
-            x_train = X_train.text.iloc[rest]
+            x_train = X_train.iloc[rest]
             y_train = Y_train.iloc[rest]
                 
-            x_test = X_train.text.iloc[fold]
+            x_test = X_train.iloc[fold]
             y_test = Y_train.iloc[fold]
             
-            for model_i, model in enumerate([BagOfWordsNB]):
-                model_name = type(model()).__name__
+            for pipeline, model in [([
+                    RemovePunctuation(translate_table),
+                    LowerCase(),
+                    BinaryBagOfWordsEncode()],NaiveBayes()),([
+                        RemovePunctuation(translate_table),
+                        LowerCase(),
+                        BagOfWordsEncode()], NaiveBayes())]:
+                model_name = type(model).__name__
                 print("Model:", model_name)
                 starttime = time.time()
                
@@ -290,25 +284,24 @@ def run_cv():
                 # feature_encoder = countvec()
                 # feature_encoder.fit(x_train)
                 
-                
-                y_pred = model().fit(x_train, y_train).predict(x_test)
-                print(y_pred)
+                y_pred = run_once(x_test, x_test, y_train, y_test, pipeline, model)
+                # y_pred = model().fit(x_train, y_train).predict(x_test)
+                # print(y_pred)
                 f1=F1(y_test, y_pred, "p")
                 acc=accuracy(y_test, y_pred, "p")
                 t=time.time()-starttime
                 
 
-                print("fdsfd")
                 # print("folds", fold)
                 # print(fold, [x for x in y_pred], [x for x in y_test], F1(y_test, y_pred, "p"))
                 
                 
-                results.loc[k_i * 1 + it * 2+ model_i] = [model_name,it+1, k, len(Y_train), acc, f1, t]
+                results.loc[len(results)+1] = [model_name, it+1, k, len(Y_train), acc, f1, t]
                 # print("Results for the model", model)
                 # print("F1 Score:", "{:.2f}".format(mean(f1)))
                 # print("Accuracy:", "{:.2f}".format(mean(acc)))
                 # print(f1,acc)
-    print(results.groupby("Model")['Accuracy', 'F1'].mean())
+    # print(results.groupby("Model")['Accuracy', 'F1'].mean())
     print(results)
     return results
 
@@ -329,8 +322,22 @@ Y_test = pd.read_csv("Y_test.csv", header = None).loc[:,1]
 
 logger.info("data loaded")
 # run_cv()
-model = run_once()
 
+
+# pipeline = [
+#     RemovePunctuation(translate_table),
+#     LowerCase(),
+#     BinaryBagOfWordsEncode()
+# ]
+# model = NaiveBayes()
+
+# model = run_once(X_train, X_test, Y_train, Y_test, pipeline, model)
+results = run_cv(X_train, X_test, Y_train, Y_test)
+
+
+# wv = BagofWords_encoder()
+# X_train_enc = wv.fit_transform(X_train)
+# print(X_train_enc)
 
 # from  sklearn.feature_extraction.text import CountVectorizer 
 # from sklearn.naive_bayes import MultinomialNB
