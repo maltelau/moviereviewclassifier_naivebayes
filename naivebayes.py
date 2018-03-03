@@ -13,9 +13,9 @@ import string
 import logging
 
 # lemma = nltk.wordnet.WordNetLemmatizer()
-translate_table = dict((ord(char), None) for char in string.punctuation)  
-
-from typing import List
+REMOVE_PUNCTUATION_TABLE = dict((ord(char), None) for char in string.punctuation)
+SENTENCE_RE = '[!"(),-.:;?[{}\]\`|~]'
+NOT_RE = '(not|no|never|n\'t)(.*)'
 
 ################################
 # Set up logging
@@ -35,22 +35,33 @@ logger.setLevel(logging.DEBUG)
 debug_X = pd.Series(["no no no, this is not supposed ",
                      "This movie was great!",
                      "I'd never seen a Tarzan movie ",
-                     "Oh my, I think this may be the single cheesiest"])
-debug_Y = pd.Series(['n', 'p', 'p', 'n'])
+                     "Oh my, I think this may be the single cheesiest",
+                     "I don't know what, but I like it."])
+debug_Y = pd.Series(['n', 'p', 'p', 'n', 'p'])
 
 
 
 #################################
-# Classes
+# Text preprocessing steps
 
 class AnalysisStep:
+    """
+    Base class for each analysis step in the pipeline
+    __init__ is called when the pipeline is defined, so if there are any settings, 
+        they should be taken here.
+    fit() is called once on the training data, and doesn't change the training data
+    transform() is called once on the training data, and once on the test data. 
+    
+    Only transform() needs to be overridden.
+
+    """
     def __init__(self):
         pass
-    def fit(self, *args, **kwargs):
+    def fit(self, X):
         return self
-    def transform(self, *args, **kwargs):
+    def transform(self, X):
         raise NotImplementedError
-    def fit_transform(self, X, *args, **kwards):
+    def fit_transform(self, X):
         return self.fit(X).transform(X)
 
 class RemovePunctuation(AnalysisStep):
@@ -59,9 +70,32 @@ class RemovePunctuation(AnalysisStep):
     def transform(self, X: pd.Series) -> pd.Series:
         return X.apply(lambda review: review.translate(self.tt))
 
+    
 class LowerCase(AnalysisStep):
     def transform(self, X: pd.Series) -> pd.Series:
         return X.apply(lambda s: s.lower())
+
+    
+class PrefixNot(AnalysisStep):
+    def __init__(self, not_re, sentence_re):
+        self.not_re = not_re
+        self.sentence_re = sentence_re
+        
+    def transform(self, X):
+        return X.apply(self._prefix_on_review)
+        
+    def _prefix_on_review(self, review):
+        return ' '.join([self._prefix_on_sentence(s) for s in re.split(self.sentence_re, review)])
+    
+    def _prefix_on_sentence(self, sentence):
+        rgx = re.search(self.not_re, sentence)
+        if rgx:
+            # negatives found in the sentence, prepend NOT_ to all words after that.
+            return ' '.join([rgx.group(1)] + ["NOT_" + w for w in rgx.group(2).split()])
+        else:
+            # no negatives found
+            return sentence
+
 
 class BagOfWordsEncode(AnalysisStep):
     def __init__(self):
@@ -106,6 +140,10 @@ class BinaryBagOfWordsEncode(BagOfWordsEncode):
         return super().transform(X)
         
 
+
+############################################
+# The classifier
+    
 class NaiveBayes(AnalysisStep):
     """
     Fit a naive bayes classifier
@@ -269,13 +307,15 @@ def run_cv(X_train, X_test, Y_train, Y_test):
             x_test = X_train.iloc[fold]
             y_test = Y_train.iloc[fold]
             
-            for pipeline, model in [([
-                    RemovePunctuation(translate_table),
-                    LowerCase(),
-                    BinaryBagOfWordsEncode()],NaiveBayes()),([
-                        RemovePunctuation(translate_table),
-                        LowerCase(),
-                        BagOfWordsEncode()], NaiveBayes())]:
+            for pipeline, model in [
+                    ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #1
+                      LowerCase(),
+                      BinaryBagOfWordsEncode()],
+                     NaiveBayes()),
+                    ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #2
+                      LowerCase(),
+                      BagOfWordsEncode()],
+                     NaiveBayes())]:
                 model_name = type(model).__name__
                 print("Model:", model_name)
                 starttime = time.time()
@@ -324,15 +364,22 @@ logger.info("data loaded")
 # run_cv()
 
 
-# pipeline = [
-#     RemovePunctuation(translate_table),
-#     LowerCase(),
-#     BinaryBagOfWordsEncode()
-# ]
-# model = NaiveBayes()
+pipeline = [
+    RemovePunctuation(REMOVE_PUNCTUATION_TABLE),
+    LowerCase(),
+    PrefixNot(NOT_RE, SENTENCE_RE),
+    BagOfWordsEncode()
+]
+model = NaiveBayes()
 
-# model = run_once(X_train, X_test, Y_train, Y_test, pipeline, model)
-results = run_cv(X_train, X_test, Y_train, Y_test)
+model = run_once(X_train, X_test, Y_train, Y_test, pipeline, model)
+
+
+
+# pn = PrefixNot(NOT_RE, SENTENCE_RE)
+# print(pn.transform(X_train))
+
+# results = run_cv(X_train, X_test, Y_train, Y_test)
 
 
 # wv = BagofWords_encoder()
@@ -373,11 +420,6 @@ results = run_cv(X_train, X_test, Y_train, Y_test)
 # import timeit
 # print(timeit.timeit('run_sk()' ,setup = 'from __main__ import run_sk', number = 2))
 # print(timeit.timeit('run_custom()' ,setup = 'from __main__ import run_custom', number = 2))
-
-
-
-
-
 
 
 
