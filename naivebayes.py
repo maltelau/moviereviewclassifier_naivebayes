@@ -12,6 +12,8 @@ import scipy.sparse as sp
 import string
 import logging
 
+from typing import Tuple, List
+
 # lemma = nltk.wordnet.WordNetLemmatizer()
 REMOVE_PUNCTUATION_TABLE = dict((ord(char), None) for char in string.punctuation)
 SENTENCE_RE = '[!"(),-.:;?[{}\]\`|~]'
@@ -27,7 +29,7 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 if not logger.handlers:
     logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 #################################
 # Debugging test data
@@ -68,11 +70,13 @@ class RemovePunctuation(AnalysisStep):
     def __init__(self, translate_table):
         self.tt = translate_table
     def transform(self, X: pd.Series) -> pd.Series:
+        logger.debug("Removing punctuation")
         return X.apply(lambda review: review.translate(self.tt))
 
     
 class LowerCase(AnalysisStep):
     def transform(self, X: pd.Series) -> pd.Series:
+        logger.debug("Transforming to lowercase")
         return X.apply(lambda s: s.lower())
 
     
@@ -82,6 +86,7 @@ class PrefixNot(AnalysisStep):
         self.sentence_re = sentence_re
         
     def transform(self, X):
+        logger.debug("Prefixing NOT_")
         return X.apply(self._prefix_on_review)
         
     def _prefix_on_review(self, review):
@@ -103,7 +108,7 @@ class BagOfWordsEncode(AnalysisStep):
         self.word_set_dictionary = None
 
     def fit(self, X):
-        logger.info("calculating word set")
+        logger.debug("calculating word set")
         self.word_set = list(set([word for review in X for word in review.split()]))
         self.word_set_dictionary = dict((v,k) for k,v in enumerate(self.word_set))
         return self
@@ -113,7 +118,7 @@ class BagOfWordsEncode(AnalysisStep):
         if not self.word_set:
             logger.error('Need to fit the encoder before transforming')
         
-        logger.info("generating word vectors")
+        logger.debug("generating word vectors")
         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_matrix.html
         indptr = [0]
         indices = []
@@ -169,7 +174,6 @@ class NaiveBayes(AnalysisStep):
         
         # self.X_train = X
         self.Y_train = Y
-        logger.info("fitting model: " + type(self).__name__)
 
         self.X_train_enc = X
         self.alpha = alpha
@@ -177,14 +181,15 @@ class NaiveBayes(AnalysisStep):
         # calculate the priors P(c)
         self.prior = np.log(np.array(Y.value_counts() / len(Y)))
         
-        logger.info("calculating likelihood")
+        logger.debug("calculating likelihood")
         # initialize an empy array of the correct shape
-        self.unstd_likelihood = np.empty([len(Y_train.unique()),
+        self.unstd_likelihood = np.empty([len(self.Y_train.unique()),
                                           X.shape[1]])
 
         # for each class, sum up the counts for each word
-        for i, cls in enumerate(Y_train.unique()):
-            self.unstd_likelihood[i] = self.X_train_enc[np.where(Y_train == cls)].\
+        for i, cls in enumerate(self.Y_train.unique()):
+            idx = np.where(self.Y_train == cls)
+            self.unstd_likelihood[i] = self.X_train_enc[idx].\
                                        sum(axis = 0) \
                                        + alpha
 
@@ -198,7 +203,7 @@ class NaiveBayes(AnalysisStep):
     def predict(self, X: sp.csr_matrix) -> pd.Series:
         # return the predicted labels (ie y_pred)
 
-        logger.info("calculating posterior")
+        logger.debug("calculating posterior")
         self.posterior = np.hstack([(X * sp.diags(cls)).sum(axis = 1) \
                                     for cls in self.likelihood]) \
                                         + self.prior
@@ -227,7 +232,6 @@ def F1(true, predicted, pos, beta = 1):
 
     recall = tp / (tp + fn)
     precision = tp / (tp + fp)
-    # print(tp,tn,fp,fn, recall,precision)
 
     if tp == 0: return 0
     else:
@@ -239,6 +243,7 @@ def accuracy(true, predicted, pos):
     return acc
 
 def cv_folds(n, k):
+    # generator that yields indices used to subset the data for crossvalidation
     if n % k == 0:
         pad = 0
     else:
@@ -251,7 +256,7 @@ def cv_folds(n, k):
     
     
 def read_data(path, max_files = None):
-    # X = pd.DataFrame(columns = ['id', 'rating', 'text'])
+    # read through the data in DATA/
     X = pd.Series()
     Y = pd.Series()
     l = 0
@@ -273,153 +278,139 @@ def read_data(path, max_files = None):
                 Y.loc[i] = c
     return X, Y
 
+###################################3
+# Functions to run the analysis
+
+
+def preprocess_pipeline(pipeline: List[AnalysisStep],
+                        train: pd.Series, test: pd.Series = None) -> Tuple[sp.csr_matrix]:
+    
+    for i in range(len(pipeline)):
+        logger.info(f'Preprocessing pipeline step {i+1} of {len(pipeline)}')
+        pipeline[i] = pipeline[i].fit(train)
+        train = pipeline[i].transform(train)
+        if not test is None:
+            test = pipeline[i].transform(test)
+
+    return train, test
 
 
 def run_once(X_train, X_test, Y_train, Y_test, pipeline, model):
-    for i in range(len(pipeline)):
-        logger.debug(f'Preprocessing pipeline step {i+1} of {len(pipeline)}')
-        pipeline[i] = pipeline[i].fit(X_train)
-        X_train = pipeline[i].transform(X_train)
-        X_test = pipeline[i].transform(X_test)
-
+    X_train, X_test = preprocess_pipeline(pipeline, X_train, X_test)
     model = model.fit(X_train, Y_train, alpha = 1)
     Y_pred = model.predict(X_test)
-    print(f"Prediction counts: {dict(collections.Counter(Y_pred))}\nF1: {F1(Y_test, Y_pred, 'p'):.3f}\nAccuracy: {accuracy(Y_test, Y_pred, 'p'):.3f}")
+    logger.info(f"\nPrediction counts: {dict(collections.Counter(Y_pred))}\nF1: {F1(Y_test, Y_pred, 'p'):.3f}\nAccuracy: {accuracy(Y_test, Y_pred, 'p'):.3f}")
     return model
 
     
 
-def run_cv(X_train, X_test, Y_train, Y_test):
-    results = pd.DataFrame(columns = ['Model','fold', 'k', 'n', 'Accuracy', 'F1', 'Time'])
-    
-    for k in [5, 10]: # k fold cv
-        # f1 = collections.defaultdict(list)
-        # acc = collections.defaultdict(list)
-        # t = collections.defaultdict(list)
-        
-        for it, fold in enumerate(cv_folds(len(X_train), k)): # process one fold
-            logger.info(f"FOLD: {it+1} of {k}")
-            rest = [i for i in range(len(X_train)) if i not in fold]
-                
-            x_train = X_train.iloc[rest]
-            y_train = Y_train.iloc[rest]
-                
-            x_test = X_train.iloc[fold]
-            y_test = Y_train.iloc[fold]
-            
-            for pipeline, model in [
-                    ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #1
-                      LowerCase(),
-                      BinaryBagOfWordsEncode()],
-                     NaiveBayes()),
-                    ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #2
-                      LowerCase(),
-                      BagOfWordsEncode()],
-                     NaiveBayes())]:
-                model_name = type(model).__name__
-                print("Model:", model_name)
-                starttime = time.time()
-               
-                # print("training word vectorizer")
-                # feature_encoder = countvec()
-                # feature_encoder.fit(x_train)
-                
-                y_pred = run_once(x_test, x_test, y_train, y_test, pipeline, model)
-                # y_pred = model().fit(x_train, y_train).predict(x_test)
-                # print(y_pred)
-                f1=F1(y_test, y_pred, "p")
-                acc=accuracy(y_test, y_pred, "p")
-                t=time.time()-starttime
-                
+def run_cv(X, Y, models):
+    results = pd.DataFrame(columns = ['Model', 'Pipeline version','k',
+                                      'n', 'Accuracy', 'F1', 'Time'])
 
-                # print("folds", fold)
-                # print(fold, [x for x in y_pred], [x for x in y_test], F1(y_test, y_pred, "p"))
+    for j, (pipeline, model) in enumerate(models):
+
+        model_name = type(model).__name__
+        logger.info(f"Model: {model_name}, Pipeline Version: {j+1}")
+
+        X_pre, _ = preprocess_pipeline(pipeline, X)
+    
+        for k in [10]: # k fold cv
+            logger.info(f"Running {k} fold cross validation")
+
+            Y_TEST = Y
+            Y_PRED = pd.Series([None] * Y.shape[0])
+        
+            starttime = time.time()
+            for it, fold in enumerate(cv_folds(len(Y), k)):
+                # process one fold
+                logger.info(f"FOLD: {it+1} of {k}")
+                rest = [i for i in range(len(X_train)) if i not in fold]
+                x_train = X_pre[rest,:]
+                y_train = Y.iloc[rest]
                 
+                x_test = X_pre[fold,:]
+                y_test = Y.iloc[fold]
                 
-                results.loc[len(results)+1] = [model_name, it+1, k, len(Y_train), acc, f1, t]
-                # print("Results for the model", model)
-                # print("F1 Score:", "{:.2f}".format(mean(f1)))
-                # print("Accuracy:", "{:.2f}".format(mean(acc)))
-                # print(f1,acc)
-    # print(results.groupby("Model")['Accuracy', 'F1'].mean())
-    print(results)
+                model = model.fit(x_train, y_train)
+                # store the predictions for this fold in the right place in Y_PRED
+                Y_PRED[fold] = model.predict(x_test)
+
+            # now calculate f1 and accuracy for the predictions from all folds
+            f1=F1(Y_TEST, Y_PRED, "p")
+            acc=accuracy(Y_TEST, Y_PRED, "p")
+            t=time.time()-starttime
+            results.loc[len(results)+1] = [model_name, j+1, k, len(Y_train), acc, f1, t]
+            
+    logger.info('\n' + str(results))
     return results
 
 
-logger.info("loading data")
-# X_train, Y_train = read_data("DATA/aclImdb/train/", 1000)
-# X_test, Y_test = read_data("DATA/aclImdb/test/", 1000)
-
-# X_train.to_csv("X_train.csv")
-# X_test.to_csv("X_test.csv")
-# Y_train.to_csv("Y_train.csv")
-# Y_test.to_csv("Y_test.csv")
-
-X_train = pd.read_csv("X_train.csv").text
-X_test = pd.read_csv("X_test.csv").text
-Y_train = pd.read_csv("Y_train.csv", header = None).loc[:,1]
-Y_test = pd.read_csv("Y_test.csv", header = None).loc[:,1]
-
-logger.info("data loaded")
-# run_cv()
-
-
-pipeline = [
-    RemovePunctuation(REMOVE_PUNCTUATION_TABLE),
-    LowerCase(),
-    PrefixNot(NOT_RE, SENTENCE_RE),
-    BagOfWordsEncode()
-]
-model = NaiveBayes()
-
-model = run_once(X_train, X_test, Y_train, Y_test, pipeline, model)
 
 
 
-# pn = PrefixNot(NOT_RE, SENTENCE_RE)
-# print(pn.transform(X_train))
 
-# results = run_cv(X_train, X_test, Y_train, Y_test)
-
-
-# wv = BagofWords_encoder()
-# X_train_enc = wv.fit_transform(X_train)
-# print(X_train_enc)
-
-# from  sklearn.feature_extraction.text import CountVectorizer 
-# from sklearn.naive_bayes import MultinomialNB
-# # 
-# def run_sk():
-#     print("constructing word vectors")
-#     bow = CountVectorizer()
-#     X_train_enc = bow.fit_transform(X_train.text)
-#     X_test_enc = bow.transform(X_test.text)
-#     print("fitting model")
-#     skNB = MultinomialNB()
-#     skNB.fit(X_train_enc, Y_train)
-#     print("predicting labels")
-#     y_pred = skNB.predict(X_test_enc)
-#     print("calculating F1")
-#     print(F1(Y_test, y_pred, "p"))
+# if __name__ == '__main__':
+if True:
 
 
-# run_sk()
-#     print("sklearn F1:", F1(Y_test, y_pred, "p"))
-
-# def run_custom():
-#     mod = BagOfWordsNB().fit(X_train.text, Y_train)
-#     y_pred = mod.predict(X_test.text)
-#     print("custom F1:", F1(Y_test, y_pred, "p"))
-
-# class BagOfWordsNB_cv(BagOfWordsNB):
-#     def lemmatize(self, X):
-#         return X
-        
-# run_custom()
-
-# import timeit
-# print(timeit.timeit('run_sk()' ,setup = 'from __main__ import run_sk', number = 2))
-# print(timeit.timeit('run_custom()' ,setup = 'from __main__ import run_custom', number = 2))
+    
+    logger.info("loading data")
+    # load and parse the data as it were originally
+    # this is slow ...
+    # X_train, Y_train = read_data("DATA/aclImdb/train/", 1000)
+    # X_test, Y_test = read_data("DATA/aclImdb/test/", 1000)
+    
+    # .. or load it once and save all in a csv
+    # X_train.to_csv("X_train.csv")
+    # X_test.to_csv("X_test.csv")
+    # Y_train.to_csv("Y_train.csv")
+    # Y_test.to_csv("Y_test.csv")
+    
+    X_train = pd.read_csv("X_train.csv").text
+    X_test = pd.read_csv("X_test.csv").text
+    Y_train = pd.read_csv("Y_train.csv", header = None).loc[:,1]
+    Y_test = pd.read_csv("Y_test.csv", header = None).loc[:,1]
+    
+    logger.info("data loaded")
 
 
 
+    # a model is (pipeline, model) where pipeline is a l
+    # haven't found a more elegant way to specify these ..
+    models =  [\
+            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #1
+              LowerCase(),
+              BinaryBagOfWordsEncode()],
+             NaiveBayes()),
+            
+            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #2
+              LowerCase(),
+              PrefixNot(NOT_RE, SENTENCE_RE),
+              BinaryBagOfWordsEncode()],
+             NaiveBayes()),
+            
+            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #3
+              LowerCase(),
+              BagOfWordsEncode()],
+             NaiveBayes()),
+            
+            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #4
+              LowerCase(),
+              PrefixNot(NOT_RE, SENTENCE_RE),
+              BagOfWordsEncode()],
+             NaiveBayes())]
+    
+    results = run_cv(X_train, Y_train, models.copy())
+    # now select the best pipeline from these results and test it against the test set:
+
+    best_model = results.sort_values("F1").loc[:,"Pipeline version"].tail(1)
+    
+    best_pipeline = models[int(best_model)-1]
+    logger.info(f"Best pipeline + model:")
+    for p in best_pipeline[0]:
+        logger.info('+ ' + type(p).__name__)
+    logger.info('* ' + type(best_pipeline[1]).__name__)
+
+    logger.info("Fitting best model on full training set and testing against test set")
+    model = run_once(X_train, X_test, Y_train, Y_test, best_pipeline[0], best_pipeline[1])
