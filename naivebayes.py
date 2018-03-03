@@ -1,23 +1,36 @@
 
+"""
+Naive Bayes classifier for sentiment analysis
+Classifying movie reviews as "p"ositive (rating > 7) 
+or "n"egative (<4) 
+
+Assigmnent for INFO284: Machine learning
+
+Malte Lau Petersen
+maltelau@protonmail.com
+"""
+
+
 import pandas as pd
 import numpy as np
-# import nltk
+import scipy.sparse as sp
 import re
 import random
 import math
 import glob
 import collections
-import scipy.sparse as sp
-# import time
+import time
 import string
 import logging
+import nltk
 
 from typing import Tuple, List
 
-# lemma = nltk.wordnet.WordNetLemmatizer()
 REMOVE_PUNCTUATION_TABLE = dict((ord(char), None) for char in string.punctuation)
 SENTENCE_RE = '[!"(),-.:;?[{}\]\`|~]'
-NOT_RE = '(not|no|never|n\'t)(.*)'
+NOT_RE = '(not|no|never|nev|n\'t)(.*)'
+
+
 
 ################################
 # Set up logging
@@ -101,7 +114,30 @@ class PrefixNot(AnalysisStep):
             # no negatives found
             return sentence
 
+class LancasterStem(AnalysisStep):
+    def __init__(self):
+        self.st = nltk.stem.lancaster.LancasterStemmer()
+    def transform(self, X):
+        logger.debug("Stemming with nltk.stem.lancaster")
+        return X.apply(lambda review: ' '.join([self.st.stem(word) for word in review.split()]))
+        
 
+class WordNetLemmatize(AnalysisStep):
+    def __init__(self):
+        self.lemma = nltk.wordnet.WordNetLemmatizer()
+    def transform(self, X):
+        logger.debug("Lemmatizing with nltk.wordnet")
+        return X.apply(self.lemma.lemmatize)
+
+class FilterStopwords(AnalysisStep):
+    def __init__(self):
+        self.stopwords = nltk.corpus.stopwords.words("english")
+    def transform(self, X):
+        logger.debug("Filtering out stopwords from nltk.corpus.stopwords")
+        return X.apply(lambda review: ' '.join([word for word in review.split()
+                                                if not word in self.stopwords]))
+
+    
 class BagOfWordsEncode(AnalysisStep):
     def __init__(self):
         self.word_set = None
@@ -335,12 +371,16 @@ def run_cv(X, Y, models):
                 model = model.fit(x_train, y_train)
                 # store the predictions for this fold in the right place in Y_PRED
                 Y_PRED[fold] = model.predict(x_test)
+                
+                del x_train, y_train, x_test, y_test
 
             # now calculate f1 and accuracy for the predictions from all folds
             f1=F1(Y_TEST, Y_PRED, "p")
             acc=accuracy(Y_TEST, Y_PRED, "p")
             t=time.time()-starttime
             results.loc[len(results)+1] = [model_name, j+1, k, len(Y_train), acc, f1, t]
+            
+        del model, X_pre, _
             
     logger.info('\n' + str(results))
     return results
@@ -378,26 +418,37 @@ if True:
 
     # a model is (pipeline, model) where pipeline is a l
     # haven't found a more elegant way to specify these ..
-    models =  [\
-            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #1
-              LowerCase(),
-              BinaryBagOfWordsEncode()],
-             NaiveBayes()),
+    # models =  [\
+    #         ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #1
+    #           LowerCase(),
+    #           BinaryBagOfWordsEncode()],
+    #          NaiveBayes()),
             
-            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #2
-              LowerCase(),
-              PrefixNot(NOT_RE, SENTENCE_RE),
-              BinaryBagOfWordsEncode()],
-             NaiveBayes()),
+    #         ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #2
+    #           LowerCase(),
+    #           PrefixNot(NOT_RE, SENTENCE_RE),
+    #           BinaryBagOfWordsEncode()],
+    #          NaiveBayes()),
             
+    #         ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #3
+    #           LowerCase(),
+    #           BagOfWordsEncode()],
+    #          NaiveBayes()),
+            
+    #         ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #4
+    #           LowerCase(),
+    #           PrefixNot(NOT_RE, SENTENCE_RE),
+    #           BagOfWordsEncode()],
+    #          NaiveBayes())]
+
+    models = [
             ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #3
               LowerCase(),
               BagOfWordsEncode()],
              NaiveBayes()),
-            
-            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #4
+            ([RemovePunctuation(REMOVE_PUNCTUATION_TABLE), #3
               LowerCase(),
-              PrefixNot(NOT_RE, SENTENCE_RE),
+              FilterStopwords(),
               BagOfWordsEncode()],
              NaiveBayes())]
     
