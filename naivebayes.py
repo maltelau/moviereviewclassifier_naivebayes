@@ -283,6 +283,22 @@ def accuracy(true, predicted, pos):
     acc = (tp + tn) / (tp + fp + tn + fn)
     return acc
 
+    
+def brier_score(Y, classes, posterior):
+    # calculate the brier score (a commonly used proper scoring rule)
+    # 1 = worst
+    # 0 = best
+    N = len(Y)
+    true_classes = np.array(Y.apply(lambda cls: int(np.where(classes != cls)[0])))
+    posterior = np.exp(posterior - mean(posterior, axis = 1).reshape(N, 1))
+    posterior = (posterior / posterior.sum(axis = 1).reshape(N, 1))
+
+    term = posterior[:,0] - true_classes
+    brier = sum(term ** 2) / N
+
+    return brier
+    
+    
 def cv_folds(n, k):
     # generator that yields indices used to subset the data for crossvalidation
     if n % k == 0:
@@ -323,7 +339,10 @@ def read_data(path, max_files = None):
 def save_model(model, pipeline, folder = "model"):
     """ Save a model to disk. """
     
-    os.makedirs(folder)
+    try:
+        os.makedirs(folder)
+    except FileExistsError:
+        pass
 
     with open(os.path.join(folder, "pipeline.pickled"), "wb") as f:
         pickle.dump(pipeline, f)
@@ -366,14 +385,18 @@ def run_once(X_train, X_test, Y_train, Y_test, pipeline, model):
     X_train, X_test = preprocess_pipeline(pipeline, X_train, X_test)
     model = model.fit(X_train, Y_train, alpha = 1)
     Y_pred = model.predict(X_test)
-    logger.info(f"\nPrediction counts: {dict(collections.Counter(Y_pred))}\nF1: {F1(Y_test, Y_pred, 'p'):.3f}\nAccuracy: {accuracy(Y_test, Y_pred, 'p'):.3f}")
+    logger.info(f"""
+Prediction counts: {dict(collections.Counter(Y_pred))}
+F1: {F1(Y_test, Y_pred, 'p'):.3f}
+Accuracy: {accuracy(Y_test, Y_pred, 'p'):.3f}
+Brier score: {brier_score(Y_test, model.classes, model.posterior):.3f}""")
     return model
 
     
 
 def run_cv(X, Y, models):
     results = pd.DataFrame(columns = ['Model', 'Pipeline version','k',
-                                      'n', 'Accuracy', 'F1', 'Time'])
+                                      'n', 'Accuracy', 'F1', 'Brier', 'Time'])
 
     for j, (pipeline, model) in enumerate(models):
 
@@ -386,12 +409,13 @@ def run_cv(X, Y, models):
             logger.info(f"Running {k} fold cross validation")
 
             Y_TEST = Y
-            Y_PRED = pd.Series([None] * Y.shape[0])
+            Y_PRED = pd.Series([None] * len(Y))
+            POSTERIOR = np.array(np.empty((len(Y), len(Y.unique()))))
         
             starttime = time.time()
             for it, fold in enumerate(cv_folds(len(Y), k)):
                 # process one fold
-                logger.info(f"FOLD: {it+1} of {k}")
+                logger.info(f"Fold {it+1} of {k}")
                 rest = [i for i in range(len(X_train)) if i not in fold]
                 x_train = X_pre[rest,:]
                 y_train = Y.iloc[rest]
@@ -402,6 +426,7 @@ def run_cv(X, Y, models):
                 model = model.fit(x_train, y_train)
                 # store the predictions for this fold in the right place in Y_PRED
                 Y_PRED[fold] = model.predict(x_test)
+                POSTERIOR[fold] = model.posterior
                 
                 del x_train, y_train, x_test, y_test
 
@@ -409,7 +434,8 @@ def run_cv(X, Y, models):
             f1=F1(Y_TEST, Y_PRED, "p")
             acc=accuracy(Y_TEST, Y_PRED, "p")
             t=time.time()-starttime
-            results.loc[len(results)+1] = [model_name, j+1, k, len(Y_train), acc, f1, t]
+            brier = brier_score(Y_TEST, Y.unique(), POSTERIOR)
+            results.loc[len(results)+1] = [model_name, j+1, k, len(Y_train), acc, f1, brier, t]
             
         del model, X_pre, _
             
@@ -421,7 +447,8 @@ def run_cv(X, Y, models):
 
 
 
-if __name__ == '__main__':
+# if __name__ == '__main__':
+if True:
 
     
     logger.info("loading data")
@@ -481,10 +508,10 @@ if __name__ == '__main__':
               BagOfWordsEncode()],
              NaiveBayes())]
     
-    results = run_cv(X_train, Y_train, models.copy())
+    results = run_cv(X_train, Y_train, models)
     # now select the best pipeline from these results and test it against the test set:
 
-    best_model = results.sort_values("F1").loc[:,"Pipeline version"].tail(1)
+    best_model = results.sort_values("Brier").loc[:,"Pipeline version"].head(1)
     
     best_pipeline = models[int(best_model)-1]
     logger.info(f"Best pipeline + model:")

@@ -21,5 +21,5 @@ for step in pipeline:
 
 Y = model.predict(X)
 posterior = np.exp(model.posterior)
-posterior = (posterior / posterior.sum()).max() * 100
+posterior = (posterior / posterior.sum(axis = 1)).max() * 100
 print(f'Predicted class: {Y[0]}\nPosterior probability: {posterior:.1f}%')
