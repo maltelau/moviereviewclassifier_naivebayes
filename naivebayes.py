@@ -1,7 +1,7 @@
 
 """
 Naive Bayes classifier for sentiment analysis
-Classifying movie reviews as "p"ositive (rating > 7) 
+Classifying movie reviews as "p"ositive (rating > 7 of 10) 
 or "n"egative (<4) 
 
 Assigmnent for INFO284: Machine learning
@@ -23,6 +23,8 @@ import time
 import string
 import logging
 import nltk
+import pickle
+import os
 
 from typing import Tuple, List
 
@@ -43,6 +45,7 @@ handler.setFormatter(formatter)
 if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+# logger.setLevel(logging.DEBUG)
 
 #################################
 # Debugging test data
@@ -210,6 +213,7 @@ class NaiveBayes(AnalysisStep):
         
         # self.X_train = X
         self.Y_train = Y
+        self.classes = Y.unique()
 
         self.X_train_enc = X
         self.alpha = alpha
@@ -219,11 +223,11 @@ class NaiveBayes(AnalysisStep):
         
         logger.debug("calculating likelihood")
         # initialize an empy array of the correct shape
-        self.unstd_likelihood = np.empty([len(self.Y_train.unique()),
+        self.unstd_likelihood = np.empty([len(self.classes),
                                           X.shape[1]])
 
         # for each class, sum up the counts for each word
-        for i, cls in enumerate(self.Y_train.unique()):
+        for i, cls in enumerate(self.classes):
             idx = np.where(self.Y_train == cls)
             self.unstd_likelihood[i] = self.X_train_enc[idx].\
                                        sum(axis = 0) \
@@ -245,7 +249,7 @@ class NaiveBayes(AnalysisStep):
                                         + self.prior
         
         # select the class with the highest posterior
-        self.predictions = pd.Series(self.Y_train.unique()[[np.argmax(review) \
+        self.predictions = pd.Series(self.classes[[np.argmax(review) \
                                                             for review in self.posterior]])
         return self.predictions
 
@@ -313,6 +317,30 @@ def read_data(path, max_files = None):
                 X.loc[i] = txt
                 Y.loc[i] = c
     return X, Y
+
+
+def save_model(model, pipeline, folder = "model"):
+    # save a model's prior, likelihood, word set, and pre-processing pipeline to disk
+
+    os.makedirs(folder)
+
+    with open(os.path.join(folder, "pipeline.pickled"), "wb") as f:
+        pickle.dump(pipeline, f)
+
+    with open(os.path.join(folder, "model.pickled"), "wb") as f:
+        pickle.dump(model, f)
+    
+
+
+def load_model(folder = "model"):
+    with open(os.path.join(folder, "pipeline.pickled"), "rb") as f:
+        pipeline = pickle.load(f)
+
+    with open(os.path.join(folder, "model.pickled"), "rb") as f:
+        model = pickle.load(f)
+
+    return model, pipeline
+    
 
 ###################################3
 # Functions to run the analysis
@@ -390,9 +418,7 @@ def run_cv(X, Y, models):
 
 
 
-# if __name__ == '__main__':
-if True:
-
+if __name__ == '__main__':
 
     
     logger.info("loading data")
@@ -463,5 +489,20 @@ if True:
         logger.info('+ ' + type(p).__name__)
     logger.info('* ' + type(best_pipeline[1]).__name__)
 
+
+
+    
     logger.info("Fitting best model on full training set and testing against test set")
     model = run_once(X_train, X_test, Y_train, Y_test, best_pipeline[0], best_pipeline[1])
+
+
+    
+    logger.info("Fitting best model on training + test set")
+    X = pd.concat((X_train, Y_train))
+    X, _ = preprocess_pipeline(best_pipeline[0], X, None)
+    Y = pd.concat((Y_train, Y_test))
+    model = best_pipeline[1].fit(X, Y, alpha = 1)
+    save_model(model, best_pipeline[0])
+
+
+
