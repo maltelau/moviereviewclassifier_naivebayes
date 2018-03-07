@@ -1,8 +1,8 @@
 
 """
-Naive Bayes classifier for sentiment analysis
-Classifying movie reviews as "p"ositive (rating > 7 of 10) 
-or "n"egative (<4) 
+Naive Bayes classifier for movie review sentiment analysis
+Classifying movie reviews as 'p'ositive (rating > 7 of 10) 
+or 'n'egative (<4) 
 
 Assigmnent for INFO284: Machine learning
 
@@ -14,6 +14,7 @@ maltelau@protonmail.com
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
+
 import re
 import random
 import math
@@ -191,19 +192,19 @@ class BinaryBagOfWordsEncode(BagOfWordsEncode):
 class NaiveBayes(AnalysisStep):
     """
     Fit a naive bayes classifier
-    Requires a subclass to define the encode method to transform 
-      the documents (X) to word vectors (X_enc)
-    Input to self.fit():
+
+    Input to .fit():
       X: sparse matrix of n * w word counts
-      Y: a "list" of n labels (of u unique classes)
+      Y: a column of n labels (of u unique classes)
       alpha: add-alpha smoothing (add alpha to each word vector during training
                                   to avoid probabilities of zero)
     Intermediates:
-      self.prior: list of u prior log(probabilities), p(class)
-      self.likelihood: sparse matrix of u * w log(likelihood), p(word|class)
-      self.posterior: matrix of n x u log(posterior), p(class|word)
+      .prior: list of u prior probabilities, log(P(class))
+      .likelihood: sparse matrix of u * w likelihoods, log(P(word|class))
+      .posterior: matrix of n x u posteriors, log(p(class|word))
+
     Output:
-      self.predict(Y) returns predicted labels for new data Y
+      .predict(X) returns predicted labels for new data
     
     """      
     def fit(self,
@@ -320,8 +321,8 @@ def read_data(path, max_files = None):
 
 
 def save_model(model, pipeline, folder = "model"):
-    # save a model's prior, likelihood, word set, and pre-processing pipeline to disk
-
+    """ Save a model to disk. """
+    
     os.makedirs(folder)
 
     with open(os.path.join(folder, "pipeline.pickled"), "wb") as f:
@@ -333,6 +334,8 @@ def save_model(model, pipeline, folder = "model"):
 
 
 def load_model(folder = "model"):
+    """ Load a model from disk. """
+    
     with open(os.path.join(folder, "pipeline.pickled"), "rb") as f:
         pipeline = pickle.load(f)
 
